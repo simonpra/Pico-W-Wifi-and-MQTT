@@ -30,11 +30,12 @@ static void mqtt_connection_callback(
     mqtt_connection_status_t status     // connection status
 ) {
     if (status == MQTT_CONNECT_ACCEPTED) {
-        printf("WIFI: connected\n");
+        printf("MQTT: Connected to broker\n");
         connected = true;
         discovery_done = false;  // Trigger discovery in the main loop
-        printf("MQTT: Connecting to broker\n");
+        printf("MQTT: Publish Discovery for HA\n");
         // Publish discovery immediately upon connection
+        // for now-on, mqtt networks events are Async using callbacks.
         mqtt_ha_publish_discovery();
     } else {
         printf("MQTT: Connection failed, status=%d\n", status);
