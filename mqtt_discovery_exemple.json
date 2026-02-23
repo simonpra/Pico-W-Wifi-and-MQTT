@@ -1,0 +1,50 @@
+{
+    "dev": {
+        "ids": [
+            "pico_env_sensor"
+        ],
+        "name": "Pico Env Sensor",
+        "mf": "DIY",
+        "mdl": "Pico W + ENS160 + AHT2x",
+        "sw": "1.1",
+        "hw": "rev0.85"
+    },
+    "avty_t": "pico_env_sensor/availability",
+    "stat_t": "pico_env_sensor/state",
+    "cmps": {
+        "sensor_temp": {
+            "p": "sensor",
+            "dev_cla": "temperature",
+            "unit_of_meas": "°C",
+            "val_tpl": "{{ value_json.temperature }}",
+            "uniq_id": "pico_env_sensor_temp"
+        },
+        "sensor_hum": {
+            "p": "sensor",
+            "dev_cla": "humidity",
+            "unit_of_meas": "%",
+            "val_tpl": "{{ value_json.humidity }}",
+            "uniq_id": "pico_env_sensor_hum"
+        },
+        "sensor_eco2": {
+            "p": "sensor",
+            "dev_cla": "carbon_dioxide",
+            "unit_of_meas": "ppm",
+            "val_tpl": "{{ value_json.eco2 }}",
+            "uniq_id": "pico_env_sensor_eco2"
+        },
+        "sensor_tvoc": {
+            "p": "sensor",
+            "dev_cla": "volatile_organic_compounds_parts",
+            "unit_of_meas": "ppb",
+            "val_tpl": "{{ value_json.tvoc }}",
+            "uniq_id": "pico_env_sensor_tvoc"
+        },
+        "sensor_aqi": {
+            "p": "sensor",
+            "dev_cla": "aqi",
+            "val_tpl": "{{ value_json.aqi }}",
+            "uniq_id": "pico_env_sensor_aqi"
+        }
+    }
+}

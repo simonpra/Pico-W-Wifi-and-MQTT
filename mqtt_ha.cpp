@@ -227,6 +227,8 @@ void mqtt_ha_discovery_callback(void *arg, err_t result) {
 //───────────────────────────────────────────────────────────────────
 //─── Auto-Discovery Home Assistant ─────────────────────────────────
 //───────────────────────────────────────────────────────────────────
+// @see https://github.com/simonpra/Pico-W-Wifi-and-MQTT/blob/main/mqtt_discovery_exemple.json
+// for the expected discovery payload for Home-Assistant
 void mqtt_ha_publish_discovery() {
     if (!connected || discovery_done) return;
 
