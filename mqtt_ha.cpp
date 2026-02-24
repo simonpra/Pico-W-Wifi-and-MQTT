@@ -6,17 +6,63 @@
 #include "lwip/apps/mqtt.h"
 #include "lwip/dns.h"
 
-// ── Configuration ──────────────────────────────────────────
+//─── Configuration ─────────────────────────────────────────────────
 #define DEVICE_ID        "pico_env_sensor"
 #define DEVICE_NAME      "Pico Env Sensor"
 #define STATE_TOPIC      "pico_env_sensor/state"
 #define DISCOVERY_PREFIX "homeassistant"
+#define BUFFER_PAYLOAD_MAX 512
+//──── Commands ─────────────────────────────────────────────────────
+// Need to have a Command Topic if we want to perform actions from Home Assistant.
+#define LED_CMD_TOPIC    "pico_env_sensor/led/brightness"
 
 static mqtt_client_t* mqtt_client = nullptr;
 static ip_addr_t broker_addr;
 static bool connected = false;
 static bool discovery_done = false;
 static uint16_t broker_port_g = 1883;
+//--- Buffer for incoming MQTT payloads (e.g., commands)
+static char    buffer_payload[BUFFER_PAYLOAD_MAX];
+static size_t  buffer_size       = 0;
+//--- Buffer total length will be set when the first header/packet
+//--- is reveived in mqtt_incoming_publish_callback()
+static u32_t   buffer_total     = 0;
+static bool    buffer_overflow  = false;
+
+//───────────────────────────────────────────────────────────────────
+//─── MQTT COMMANDS DISPATCH ────────────────────────────────────────
+//───────────────────────────────────────────────────────────────────
+// mqtt_register_commands() must be called to register the command handlers for incoming MQTT commands.
+// The command handlers will be called if the incoming MQTT Command message matches the command name in the table.
+// Must be in the form of
+//      struct CmdEntry {
+//          name: string
+//          handler: function pointer
+//      };
+static const CmdEntry* cmd_table  = nullptr;
+static size_t          cmd_count  = 0;
+
+void mqtt_register_commands(const CmdEntry* table, uint8_t count) {
+    cmd_table = table;
+    cmd_count = count;
+}
+
+//--- Check if the cmd name is in the cmd_table,
+//--- then call the corresponding handler function.
+static void dispatch_command(const char* cmd) {
+    if (cmd_table == nullptr) {
+        printf("MQTT: No command table registered\n");
+        return;
+    }
+    for (size_t i = 0; i < cmd_count; i++) {
+        if (strcmp(cmd, cmd_table[i].name) == 0) {
+            cmd_table[i].handler();
+            return;
+        }
+    }
+    printf("MQTT: Unknown command: %s\n", cmd);
+}
+
 
 //───────────────────────────────────────────────────────────────────
 //─── MQTT Callbacks ────────────────────────────────────────────────
@@ -37,6 +83,9 @@ static void mqtt_connection_callback(
         // Publish discovery immediately upon connection
         // for now-on, mqtt networks events are Async using callbacks.
         mqtt_ha_publish_discovery();
+        // Subscribe to Command Topic is then send in the publish availability callback (mqtt_ha_availability_callback)
+        // to ensure the subscription is done after discovery, and not before.
+        // As well to ensure lwIP max request is not reached...
     } else {
         printf("MQTT: Connection failed, status=%d\n", status);
         connected = false;
@@ -55,10 +104,89 @@ static void mqtt_publish_request_callback(
 }
 
 //───────────────────────────────────────────────────────────────────
+//─── MQTT SUBSCRIBE Callbacks ──────────────────────────────────────
+//───────────────────────────────────────────────────────────────────
+// When subscribing to a topic, lwIP will call this callback for each
+// new incoming message on that topic.
+
+//--- Callback for incoming messages on subscribed topics (e.g., command topic)
+//--- Callback trigger on first header/packet received by lwIP.
+static void mqtt_incoming_publish_callback(void *arg, const char *topic, u32_t tot_len) {
+    printf("MQTT: Incoming message on topic: %s (%lu bytes)\n", topic, tot_len);
+    //--- BUFFER RESET
+    buffer_size      = 0;
+    buffer_total  = tot_len;
+    buffer_overflow = (tot_len >= BUFFER_PAYLOAD_MAX); // détection dépassement
+
+    if (buffer_overflow) {
+        printf("MQTT: WARNING payload is too big (%lu > %d)!\n",
+               tot_len, BUFFER_PAYLOAD_MAX);
+    }
+}
+
+//--- Callback for incoming message data (payload) on subscribed topics.
+//--- If payload is larger than packet size, will be called multiple times
+//--- until MQTT_DATA_FLAG_LAST is set, indicating the last fragment of the payload.
+static void mqtt_incoming_data_callback(void *arg, const u8_t *data, u16_t packet_size, u8_t flags) {
+    //--- OVERFLOW check is done in mqtt_incoming_publish_callback()
+    if (!buffer_overflow) {
+        //--- Append incoming data/packet to buffer
+        size_t size_left = BUFFER_PAYLOAD_MAX - 1 - buffer_size;
+        // "if" checking may not be necessary...
+        size_t final_packet_size = (packet_size < size_left) ? packet_size : size_left;
+        //--- Append data to buffer_payload, given the current "offset" (buffer_size) and the "final_packet_size"
+        memcpy(buffer_payload + buffer_size, data, final_packet_size);
+        //--- Update actual buffer_size
+        buffer_size += final_packet_size;
+    } else {
+        printf("MQTT: Payload ignored (overflow)\n");
+        return;
+    }
+
+    //--- For the last packet/fragment of the payload containing the MQTT_DATA_FLAG_LAST flag
+    if (flags & MQTT_DATA_FLAG_LAST) {
+        //--- Null-terminate the buffer to make it a valid C-string
+        buffer_payload[buffer_size] = '\0';
+        printf("MQTT: Payload received (%zu bytes): %s\n", buffer_size, buffer_payload);
+        //--- COMMAND DISPATCH
+        dispatch_command(buffer_payload);
+    }
+}
+
+//--- Called when the subscription is confirmed by the broker
+static void mqtt_subscribe_request_callback(void *arg, err_t result) {
+    if (result == ERR_OK) {
+        printf("MQTT: Subscription confirmed\n");
+    } else {
+        printf("MQTT: Subscription error (%d)\n", result);
+    }
+}
+
+//--- SUBSCRIBE to Command Topic and set callbacks for incoming messages on that topic
+void mqtt_subscribe_commands() {
+    //--- set Callbacks BEFORE subscribing to the topic, so they are ready to handle incoming messages immediately.
+    mqtt_set_inpub_callback(
+        mqtt_client,                    // MQTT client (is a pointer)
+        mqtt_incoming_publish_callback, // Callback invoked when publish starts, contain topic and total length of payload
+        mqtt_incoming_data_callback,    // Callback for each fragment of payload that arrives
+        nullptr                         // User supplied argument to both callbacks
+    );
+
+    //--- Finally SUBSCRIBE to the Command Topic, with a callback to confirm subscription.
+    mqtt_subscribe(
+        mqtt_client,                        // MQTT client (is a pointer)
+        LED_CMD_TOPIC,                      // Topic to subscribe to (e.g., command topic)
+        1,                                  // QoS level for the subscription (0, 1, or 2)  
+        mqtt_subscribe_request_callback,    // Callback to confirm subscription
+        nullptr                             // User supplied argument to subscription callback
+    );
+}
+
+//───────────────────────────────────────────────────────────────────
 //─── MQTT Publish Helper ───────────────────────────────────────────
 //───────────────────────────────────────────────────────────────────
-// Publish a message (payload) to a specified MQTT topic via the brocker.
-// The brocker will then forward the message to any subscribed clients, like Home Assistant.
+// Publish a message (payload) to a specified MQTT topic via the broker.
+// The broker will then forward the message to any subscribed clients, like Home Assistant.
 // The retain flag indicates if the broker should keep the last message for new subscribers.
 static bool mqtt_publish_msg(const char* topic, const char* payload, bool retain, mqtt_request_cb_t cb = nullptr, void* arg = nullptr) {
     if (!connected || !mqtt_client) return false;
@@ -209,6 +337,10 @@ void mqtt_ha_availability_callback(void *arg, err_t result) {
         printf("MQTT: Availability message published successfully\n");
         printf("Discovery is now ONLINE ^^\n");
         discovery_done = true;
+        // Now that discovery is confirmed and lwIP is not overwhelmed with requests,
+        // we can subscribe to the Command Topic to receive commands from Home Assistant.
+        printf("MQTT: Subscribing BTN for HA discovery\n");
+        mqtt_subscribe_commands();
     } else {
         printf("MQTT: Failed to publish availability message (%d)\n", result);
     }
@@ -222,6 +354,28 @@ void mqtt_ha_discovery_callback(void *arg, err_t result) {
     } else {
         printf("MQTT: Failed to publish discovery message (%d)\n", result);
     }
+}
+
+//───────────────────────────────────────────────────────────────────
+//─── HOME-ASSISTANT BUTTON discovery ───────────────────────────────
+//───────────────────────────────────────────────────────────────────
+// Tell Home Assistant to make a button in the UI, which can send data
+// to the specified Command Topic.
+// Will be send as part of the discovery process at the end of mqtt_ha_publish_discovery().
+static void mqtt_ha_publish_button_discovery() {
+    const char* payload =
+        "{"
+            "\"name\":\"Led Brightness Pico\","
+            "\"cmd_t\":\"" LED_CMD_TOPIC "\","
+            "\"payload_press\":\"toggle\","
+            "\"uniq_id\":\"pico_env_sensor_led_brightness\","
+            "\"dev\":{\"ids\":[\"" DEVICE_ID "\"]}"
+        "}";
+    
+    mqtt_publish_msg(
+        DISCOVERY_PREFIX "/button/" DEVICE_ID "/led_brightness/config",
+        payload, true
+    );
 }
 
 //───────────────────────────────────────────────────────────────────
@@ -340,6 +494,8 @@ void mqtt_ha_publish_discovery() {
     //--- Callback will confirm if the message was published successfully,
     //--- and then trigger the availability message to confirm discovery.
     mqtt_publish_msg(topic, payload, true, mqtt_ha_discovery_callback);
+    //--- PUBLISH as well the BTN discovery for the LED Brightness button.
+    mqtt_ha_publish_button_discovery();
 }
 
 //───────────────────────────────────────────────────────────────────
