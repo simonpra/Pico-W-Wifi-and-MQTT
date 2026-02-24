@@ -309,6 +309,7 @@ void mqtt_ha_publish_discovery() {
         if (i < nb_sensors - 1) {
             offset += snprintf(cmps_block + offset, max_len - offset, ",");
         }
+        i++;
     }
 
     // CLOSING the "cmps" block with "}" string.
